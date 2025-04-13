@@ -60,7 +60,7 @@ class OllamaProvider(Provider):
     def __init__(self, model: str, base_url: Optional[str] = None):
         self.model = model
         self.base_url = base_url or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=60.0)
+        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=120.0)
     
     async def create_message(
         self, 
@@ -81,6 +81,11 @@ class OllamaProvider(Provider):
                         msg.get_content() if hasattr(msg, "get_content") else str(msg.content_text) 
                         if hasattr(msg, "content_text") else "")
                 }
+                # 도구 호출 ID 추가 (Ollama가 지원하는 경우)
+                tool_id = msg.get_tool_response_id()
+                if tool_id:
+                    ollama_msg["tool_call_id"] = tool_id
+                    
                 ollama_messages.append(ollama_msg)
                 continue
             
@@ -97,10 +102,12 @@ class OllamaProvider(Provider):
             if msg.role == "assistant" and len(msg.get_tool_calls()) > 0:
                 tool_calls = []
                 for call in msg.get_tool_calls():
+                    # 인자를 직접 객체로 전달 (문자열화하지 않음)
                     tool_calls.append({
+                        "id": call.id,
                         "function": {
                             "name": call.name,
-                            "arguments": call.get_arguments()
+                            "arguments": call.get_arguments()  # 직접 객체로 전달
                         }
                     })
                 
@@ -153,56 +160,125 @@ class OllamaProvider(Provider):
         data = {
             "model": self.model,
             "messages": ollama_messages,
-            "stream": False
+            "stream": False,
+            "options": {
+                "num_predict": 4096,
+                "temperature": 0.7
+            }
         }
         
         if ollama_tools:
             data["tools"] = ollama_tools
-        
-        response = await self.client.post("/api/chat", json=data)
-        response.raise_for_status()
-        result = response.json()
-        
-        # 응답 파싱
-        message = result.get("message", {})
-        
-        # 도구 호출 파싱
-        tool_calls = []
-        for tool_call in message.get("tool_calls", []):
-            if not isinstance(tool_call, dict):
-                continue
-                
-            function = tool_call.get("function", {})
-            tool_calls.append(OllamaToolCall(
-                id=tool_call.get("id", f"tc_{int(time.time() * 1000)}"),
-                name=function.get("name", ""),
-                args=function.get("arguments", {})
-            ))
 
-        content = message.get("content", "")
-        if not tool_calls and "[TOOL_CALLS]" in content:
-            # 내용에서 잠재적 도구 호출 추출 시도
-            import re
-            tool_match = re.search(r'desktop-commander__(\w+)[\s\n]*({[^}]+})', content)
-            if tool_match:
-                tool_name = f"desktop-commander__{tool_match.group(1)}"
-                try:
-                    args = json.loads(tool_match.group(2))
-                    tool_calls.append(OllamaToolCall(
-                        id=f"extracted_{int(time.time() * 1000)}",
-                        name=tool_name,
-                        args=args
-                    ))
-                    # 내용에서 도구 호출 부분 제거
-                    content = re.sub(r'\[TOOL_CALLS\].*?({[^}]+})', '', content, flags=re.DOTALL)
-                except json.JSONDecodeError:
-                    pass
+        # 디버그 로깅 - 문제를 진단하기 위한 요청 페이로드 출력 (선택 사항)
+        import logging
+        logging.debug(f"Ollama API 요청 페이로드: {json.dumps(data, default=str, ensure_ascii=False)}")
         
-        return OllamaMessage(
-            role=message.get("role", "assistant"),
-            content=content,
-            tool_calls=tool_calls
-        )
+        try:
+            response = await self.client.post("/api/chat", json=data, timeout=120.0)
+            response.raise_for_status()
+            result = response.json()
+            
+            # 응답 파싱
+            message = result.get("message", {})
+            
+            # 도구 호출 파싱
+            tool_calls = []
+            for tool_call in message.get("tool_calls", []):
+                if not isinstance(tool_call, dict):
+                    continue
+                    
+                function = tool_call.get("function", {})
+                
+                # 인자가 문자열로 오는 경우 JSON 파싱 시도
+                args = function.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"text": args}
+                
+                tool_calls.append(OllamaToolCall(
+                    id=tool_call.get("id", f"tc_{int(time.time() * 1000)}"),
+                    name=function.get("name", ""),
+                    args=args
+                ))
+
+            content = message.get("content", "")
+            
+            # 텍스트 형식의 도구 호출 감지 (대체 방법)
+            if not tool_calls:
+                # 도구 호출 패턴 확인
+                patterns = [
+                    # 표준 패턴
+                    r'([a-zA-Z0-9_-]+)__([a-zA-Z0-9_-]+)\s*(\{.*?\})',
+                    # 추가 패턴
+                    r'도구 호출:\s*([a-zA-Z0-9_-]+)__([a-zA-Z0-9_-]+)\s*(\{.*?\})',
+                    r'\[도구\]\s*([a-zA-Z0-9_-]+)__([a-zA-Z0-9_-]+)\s*(\{.*?\})'
+                ]
+                
+                for pattern in patterns:
+                    matches = re.finditer(pattern, content, re.DOTALL)
+                    for match in matches:
+                        try:
+                            if len(match.groups()) >= 3:
+                                server_name = match.group(1)
+                                tool_name = match.group(2)
+                                args_str = match.group(3)
+                                
+                                # 인자 파싱 시도
+                                try:
+                                    args = json.loads(args_str)
+                                except json.JSONDecodeError:
+                                    args = {"raw": args_str}
+                                
+                                # 도구 호출 생성
+                                tool_calls.append(OllamaToolCall(
+                                    id=f"extracted_{int(time.time() * 1000)}",
+                                    name=f"{server_name}__{tool_name}",
+                                    args=args
+                                ))
+                                
+                                # 매칭된 부분 제거
+                                content = content.replace(match.group(0), "")
+                        except Exception as e:
+                            import logging
+                            logging.error(f"도구 호출 패턴 파싱 오류: {str(e)}")
+                
+                # TOOL_CALLS 마커 제거
+                content = re.sub(r'\[TOOL_CALLS\].*?(\n|$)', '', content, flags=re.DOTALL)
+                content = content.strip()
+            
+            return OllamaMessage(
+                role=message.get("role", "assistant"),
+                content=content,
+                tool_calls=tool_calls
+            )
+            
+        except httpx.TimeoutException:
+            # 타임아웃 오류 처리
+            raise RuntimeError("Ollama 서버 응답 시간 초과. 서버 부하를 확인하거나 다시 시도하세요.")
+        except httpx.HTTPStatusError as e:
+            # HTTP 상태 오류 처리
+            status_code = e.response.status_code
+            error_message = f"Ollama API 오류 (상태 코드: {status_code})"
+            
+            # 응답 본문에서 자세한 오류 메시지 추출 시도
+            try:
+                error_json = e.response.json()
+                if "error" in error_json:
+                    error_message += f": {error_json['error']}"
+            except Exception:
+                # 응답 본문을 직접 확인
+                try:
+                    error_message += f" 응답: {e.response.text}"
+                except:
+                    pass
+                
+            raise RuntimeError(error_message)
+        except Exception as e:
+            # 그 외 모든 오류
+            raise RuntimeError(f"Ollama 연결 오류: {str(e)}")
     
     async def create_tool_response(
         self, 
@@ -235,5 +311,13 @@ class OllamaProvider(Provider):
     def name(self) -> str:
         return "ollama"
     
+    def __del__(self):
+        """소멸자에서 비동기 리소스 정리 경고"""
+        if hasattr(self, 'client') and not self.client.is_closed:
+            import warnings
+            warnings.warn("OllamaProvider 리소스가 정리되지 않았습니다. close() 메서드를 명시적으로 호출하세요.")
+    
     async def close(self):
-        await self.client.aclose()
+        """리소스 정리"""
+        if hasattr(self, 'client') and not self.client.is_closed:
+            await self.client.aclose()

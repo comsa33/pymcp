@@ -81,33 +81,95 @@ class MCPClient:
             raise ValueError("세션이 초기화되지 않았습니다")
         
         try:
+            # 도구 호출 전에 인자 유효성 검사
+            # 인자가 None이거나 빈 객체인 경우 빈 딕셔너리로 설정
+            if arguments is None:
+                arguments = {}
+            
+            # 도구 정보 조회 시도
+            try:
+                tools_list = await self.list_tools()
+                tool_found = False
+                expected_params = {}
+                
+                for tool in tools_list.tools:
+                    if tool.name == name:
+                        tool_found = True
+                        expected_params = tool.inputSchema.get("properties", {})
+                        break
+                
+                if not tool_found:
+                    self.logger.warning(f"도구 '{name}'을(를) 서버에서 찾을 수 없습니다.")
+                    # 도구를 찾을 수 없더라도 호출은 계속 진행
+            except Exception as e:
+                self.logger.warning(f"도구 정보 조회 중 오류 발생: {str(e)}")
+                # 도구 정보를 가져올 수 없더라도 호출은 계속 진행
+            
+            # 도구 호출
             result = await self.session.call_tool(name, arguments)
             
             # 응답 형식 처리 개선
             try:
-                # 1. 문자열인 경우
+                # 1. 응답이 None인 경우
+                if result.content is None:
+                    return CallToolResult(content=[{"type": "text", "text": "작업이 완료되었습니다."}])
+                
+                # 2. 문자열인 경우
                 if isinstance(result.content, str):
-                    content = [{"type": "text", "text": result.content}]
-                # 2. 이미 리스트인 경우
+                    return CallToolResult(content=[{"type": "text", "text": result.content}])
+                
+                # 3. 이미 리스트인 경우
                 elif isinstance(result.content, list):
                     content = result.content
-                    # 각 항목이 딕셔너리가 아니면 변환
-                    for i, item in enumerate(content):
-                        if not isinstance(item, dict):
-                            content[i] = {"type": "text", "text": str(item)}
-                # 3. 그 외 다른 형식
-                else:
-                    content = [{"type": "text", "text": str(result.content)}]
                     
-                return CallToolResult(content=content)
+                    # 리스트가 비어있는 경우
+                    if len(content) == 0:
+                        return CallToolResult(content=[{"type": "text", "text": "작업이 완료되었습니다."}])
+                    
+                    # 각 항목이 딕셔너리가 아니면 변환
+                    normalized_content = []
+                    for item in content:
+                        if isinstance(item, dict) and "type" in item:
+                            normalized_content.append(item)
+                        else:
+                            normalized_content.append({"type": "text", "text": str(item)})
+                    
+                    return CallToolResult(content=normalized_content)
+                
+                # 4. 그 외 다른 형식 (JSON 직렬화 시도)
+                else:
+                    try:
+                        import json
+                        json_str = json.dumps(result.content, ensure_ascii=False, indent=2)
+                        return CallToolResult(content=[
+                            {"type": "text", "text": "결과:"},
+                            {"type": "code", "text": json_str, "language": "json"}
+                        ])
+                    except (TypeError, json.JSONDecodeError):
+                        # JSON 직렬화 실패 시 문자열로 변환
+                        return CallToolResult(content=[{"type": "text", "text": str(result.content)}])
+                    
             except Exception as e:
                 self.logger.error(f"결과 형식 변환 중 오류: {str(e)}")
-                # 안전한 형식으로 변환
-                return CallToolResult(content=[{"type": "text", "text": f"(형식 오류) {str(result.content)}"}])
+                # 오류 발생 시 안전한 응답으로 변환
+                return CallToolResult(content=[
+                    {"type": "text", "text": f"(응답 처리 오류) 원본 응답: {str(result.content)}"}
+                ])
                 
         except Exception as e:
             self.logger.error(f"도구 호출 실패 '{name}': {str(e)}")
-            raise
+            # 상세한 오류 메시지 생성
+            error_message = f"도구 '{name}' 호출 중 오류 발생:\n{str(e)}"
+            
+            if hasattr(e, "__traceback__"):
+                import traceback
+                tb_str = "".join(traceback.format_tb(e.__traceback__))
+                self.logger.debug(f"도구 호출 오류 상세 내용:\n{tb_str}")
+            
+            # 오류 응답 반환
+            return CallToolResult(content=[
+                {"type": "text", "text": error_message}
+            ])
     
     async def close(self) -> None:
         """클라이언트 리소스 정리"""
@@ -127,26 +189,49 @@ async def create_mcp_clients(config: Dict[str, Any]) -> Dict[str, MCPClient]:
     """MCP 서버 설정에서 클라이언트 생성"""
     clients = {}
     initialized = []
+    error_messages = []
     
     try:
         for name, server_config in config.items():
-            client = MCPClient(
-                name=name,
-                command=server_config.command,
-                args=server_config.args,
-                env=server_config.env
-            )
-            
-            await client.initialize()
-            clients[name] = client
-            initialized.append(name)
+            try:
+                client = MCPClient(
+                    name=name,
+                    command=server_config.command,
+                    args=server_config.args,
+                    env=server_config.env
+                )
+                
+                await client.initialize()
+                clients[name] = client
+                initialized.append(name)
+                
+            except Exception as e:
+                # 개별 서버 오류는 기록하고 계속 진행
+                error_msg = f"서버 '{name}' 초기화 실패: {str(e)}"
+                error_messages.append(error_msg)
+                logging.error(error_msg)
+                
+                # 이미 일부 초기화된 경우 리소스 정리
+                if hasattr(client, 'close') and callable(client.close):
+                    await client.close()
+                
+                continue
+        
+        # 모든 서버가 실패하고 하나도 초기화되지 않은 경우
+        if not clients and error_messages:
+            all_errors = "\n".join(error_messages)
+            raise RuntimeError(f"모든 MCP 서버 초기화 실패:\n{all_errors}")
             
     except Exception as e:
-        # 오류 발생 시 이미 초기화된 클라이언트 정리
-        for name in initialized:
-            await clients[name].close()
-        
-        raise RuntimeError(f"MCP 클라이언트 생성 실패: {str(e)}")
+        if not isinstance(e, RuntimeError) or "모든 MCP 서버 초기화 실패" not in str(e):
+            # 이미 초기화된 클라이언트 정리
+            for name in initialized:
+                await clients[name].close()
+            
+            raise RuntimeError(f"MCP 클라이언트 생성 중 오류 발생: {str(e)}")
+        else:
+            # 이미 생성된 RuntimeError는 그대로 전달
+            raise
     
     return clients
 

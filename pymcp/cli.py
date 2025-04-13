@@ -26,7 +26,7 @@ from pymcp.utils.rendering import (
     render_help, 
     render_history
 )
-from pymcp.utils.terminal import get_user_input, run_with_spinner, print_info
+from pymcp.utils.terminal import get_user_input, run_with_spinner, print_info, print_success, print_warning, async_input, confirm_action
 
 # .env 파일 로드
 load_dotenv()
@@ -155,7 +155,7 @@ async def run_prompt(
             error_str = str(e).lower()
             
             # 과부하 오류인 경우 재시도
-            if "overloaded" in error_str or "rate limit" in error_str:
+            if any(keyword in error_str for keyword in ["overloaded", "rate limit", "capacity", "too many requests"]):
                 if retry_count >= max_retries:
                     render_error(f"서비스가 과부하 상태입니다. 잠시 후 다시 시도해주세요.")
                     return
@@ -175,8 +175,13 @@ async def run_prompt(
     
     # 텍스트 내용이 있으면 표시
     if message.content:
-        cleaned_content = re.sub(r'\[TOOL_CALLS\]', '', message.content)
-        render_prompt_response("assistant", cleaned_content)
+        # [TOOL_CALLS] 마커 제거 (Ollama 모델에서 도구 호출 표시에 사용)
+        cleaned_content = re.sub(r'\[TOOL_CALLS\].*?(\n|$)', '', message.content, flags=re.DOTALL)
+        # 다른 도구 호출 관련 텍스트 정리
+        cleaned_content = re.sub(r'desktop-commander__\w+\s*\{.*?\}', '', cleaned_content, flags=re.DOTALL)
+        
+        if cleaned_content.strip():  # 내용이 비어있지 않은 경우에만 표시
+            render_prompt_response("assistant", cleaned_content)
     
     # 메시지 저장
     message_history = add_message_to_history(message_history, message)
@@ -219,18 +224,42 @@ async def run_prompt(
                 logger.info(f"도구 이름에 네임스페이스 추가: {tool_name} → {qualified_tool_name}")
                 tool_name = qualified_tool_name
             else:
-                render_error(f"도구 {tool_name}에 적합한 서버를 찾을 수 없습니다.")
+                error_msg = f"도구 '{tool_name}'에 적합한 서버를 찾을 수 없습니다. 사용 가능한 도구 목록을 확인하세요."
+                render_error(error_msg)
+                
+                # 오류 메시지를 도구 응답으로 저장
+                error_response = await provider.create_tool_response(
+                    tool_call_id=tool_call.id,
+                    content=error_msg
+                )
+                tool_results.append(error_response)
                 continue
         
-        parts = tool_name.split("__")
+        parts = tool_name.split("__", 1)  # maxsplit=1로 설정하여 이름에 __가 여러 개 있어도 처리 가능
         if len(parts) != 2:
-            render_error(f"잘못된 도구 이름 형식: {tool_name}")
+            error_msg = f"잘못된 도구 이름 형식: {tool_name} (서버__도구명 형식이어야 합니다)"
+            render_error(error_msg)
+            
+            # 오류 메시지를 도구 응답으로 저장
+            error_response = await provider.create_tool_response(
+                tool_call_id=tool_call.id,
+                content=error_msg
+            )
+            tool_results.append(error_response)
             continue
         
         server_name, simple_tool_name = parts
         mcp_client = mcp_clients.get(server_name)
         if not mcp_client:
-            render_error(f"서버를 찾을 수 없음: {server_name}")
+            error_msg = f"서버 '{server_name}'을(를) 찾을 수 없습니다. 서버가 실행 중인지 확인하세요."
+            render_error(error_msg)
+            
+            # 오류 메시지를 도구 응답으로 저장
+            error_response = await provider.create_tool_response(
+                tool_call_id=tool_call.id,
+                content=error_msg
+            )
+            tool_results.append(error_response)
             continue
         
         # 도구 인자 변환
@@ -241,7 +270,7 @@ async def run_prompt(
             return await mcp_client.call_tool(simple_tool_name, tool_args)
         
         try:
-            tool_result = await run_with_spinner(f"도구 {simple_tool_name} 실행 중...", call_tool_task)
+            tool_result = await run_with_spinner(f"도구 '{simple_tool_name}' 실행 중...", call_tool_task)
             
             # 도구 응답 생성
             tool_response = await provider.create_tool_response(
@@ -252,11 +281,11 @@ async def run_prompt(
             
             # 도구 응답 저장
             tool_results.append(tool_response)
-            logger.info(f"도구 {simple_tool_name} 응답 저장됨")
+            logger.info(f"도구 '{simple_tool_name}' 응답 저장됨")
 
             
         except Exception as e:
-            error_msg = f"도구 {simple_tool_name} 호출 오류: {str(e)}"
+            error_msg = f"도구 '{simple_tool_name}' 호출 오류: {str(e)}"
             render_error(error_msg)
             
             # 오류 메시지를 도구 응답으로 저장
@@ -280,13 +309,14 @@ async def handle_slash_command(command: str, config: Config, clients: Dict[str, 
     if not command.startswith("/"):
         return False
     
-    cmd = command.strip().lower()
+    cmd_parts = command.strip().split()
+    base_cmd = cmd_parts[0].lower()
     
-    if cmd == "/help":
+    if base_cmd == "/help":
         render_help()
         return True
     
-    elif cmd == "/tools":
+    elif base_cmd == "/tools":
         tools_by_server = {}
         
         async def fetch_tools():
@@ -302,15 +332,163 @@ async def handle_slash_command(command: str, config: Config, clients: Dict[str, 
         render_tools_list(tools_by_server)
         return True
     
-    elif cmd == "/servers":
+    elif base_cmd == "/servers":
         render_servers_list(config.get_servers())
         return True
     
-    elif cmd == "/history":
+    elif base_cmd == "/history":
         render_history(history)
         return True
     
-    elif cmd == "/quit":
+    elif base_cmd == "/addserver":
+        # 형식: /addserver 이름 명령어 [인자...]
+        if len(cmd_parts) < 3:
+            render_error("사용법: /addserver <이름> <명령어> [인자...]")
+            return True
+        
+        server_name = cmd_parts[1]
+        command = cmd_parts[2]
+        args = cmd_parts[3:] if len(cmd_parts) > 3 else []
+        
+        # 환경 변수는 대화형으로 수집
+        env = {}
+        need_env = await async_input("환경 변수가 필요한가요? (y/n): ")
+        
+        if need_env.lower().startswith('y'):
+            print_info("환경 변수를 입력하세요 (key=value 형식, 완료하려면 빈 줄 입력)")
+            while True:
+                env_line = await async_input("> ")
+                if not env_line:
+                    break
+                
+                if '=' in env_line:
+                    key, value = env_line.split('=', 1)
+                    env[key.strip()] = value.strip()
+                else:
+                    print_warning("잘못된 형식입니다. key=value 형식으로 입력하세요.")
+        
+        # 서버 추가
+        config.add_server(server_name, command, args, env)
+        print_success(f"서버 '{server_name}'이(가) 추가되었습니다.")
+        return True
+    
+    elif base_cmd == "/removeserver":
+        # 형식: /removeserver 이름
+        if len(cmd_parts) != 2:
+            render_error("사용법: /removeserver <이름>")
+            return True
+        
+        server_name = cmd_parts[1]
+        
+        # 서버가 존재하는지 확인
+        servers = config.get_servers()
+        if server_name not in servers:
+            render_error(f"서버 '{server_name}'이(가) 존재하지 않습니다.")
+            return True
+        
+        # 확인 요청
+        confirm = confirm_action(f"서버 '{server_name}'을(를) 정말 삭제하시겠습니까?", False)
+        if confirm:
+            # 실행 중인 클라이언트가 있으면 종료
+            if server_name in clients:
+                await clients[server_name].close()
+                del clients[server_name]
+            
+            # 설정에서 제거
+            config.remove_server(server_name)
+            print_success(f"서버 '{server_name}'이(가) 제거되었습니다.")
+        else:
+            print_info("서버 제거가 취소되었습니다.")
+        
+        return True
+    
+    elif base_cmd == "/testserver":
+        # 형식: /testserver 이름
+        if len(cmd_parts) != 2:
+            render_error("사용법: /testserver <이름>")
+            return True
+        
+        server_name = cmd_parts[1]
+        
+        # 서버가 존재하는지 확인
+        servers = config.get_servers()
+        if server_name not in servers:
+            render_error(f"서버 '{server_name}'이(가) 존재하지 않습니다.")
+            return True
+        
+        # 이미 연결된 클라이언트가 있는지 확인
+        if server_name in clients:
+            try:
+                # 도구 목록 요청으로 테스트
+                tools_response = await clients[server_name].list_tools()
+                tool_count = len(tools_response.tools)
+                print_success(f"서버 '{server_name}'에 연결 성공! 사용 가능한 도구: {tool_count}개")
+                
+                # 도구 목록 표시
+                if tool_count > 0:
+                    render_tools_list({server_name: tools_response.tools})
+                
+            except Exception as e:
+                render_error(f"서버 '{server_name}' 테스트 실패: {str(e)}")
+                
+                # 다시 연결 시도할지 물어보기
+                should_reconnect = confirm_action("서버에 다시 연결하시겠습니까?", True)
+                if should_reconnect:
+                    try:
+                        # 기존 연결 종료
+                        await clients[server_name].close()
+                        
+                        # 새 클라이언트 생성
+                        server_config = servers[server_name]
+                        new_client = MCPClient(
+                            name=server_name,
+                            command=server_config.command,
+                            args=server_config.args,
+                            env=server_config.env
+                        )
+                        
+                        await run_with_spinner(f"서버 '{server_name}'에 다시 연결 중...", 
+                                               lambda: new_client.initialize())
+                        
+                        # 새 클라이언트로 교체
+                        clients[server_name] = new_client
+                        print_success(f"서버 '{server_name}'에 다시 연결되었습니다.")
+                        
+                    except Exception as reconnect_error:
+                        render_error(f"재연결 실패: {str(reconnect_error)}")
+            
+        else:
+            # 새 클라이언트 생성
+            try:
+                server_config = servers[server_name]
+                new_client = MCPClient(
+                    name=server_name,
+                    command=server_config.command,
+                    args=server_config.args,
+                    env=server_config.env
+                )
+                
+                await run_with_spinner(f"서버 '{server_name}'에 연결 중...", 
+                                       lambda: new_client.initialize())
+                
+                # 도구 목록 요청으로 테스트
+                tools_response = await new_client.list_tools()
+                tool_count = len(tools_response.tools)
+                
+                # 클라이언트 추가
+                clients[server_name] = new_client
+                print_success(f"서버 '{server_name}'에 연결 성공! 사용 가능한 도구: {tool_count}개")
+                
+                # 도구 목록 표시
+                if tool_count > 0:
+                    render_tools_list({server_name: tools_response.tools})
+                
+            except Exception as e:
+                render_error(f"서버 '{server_name}' 연결 실패: {str(e)}")
+        
+        return True
+    
+    elif base_cmd == "/quit":
         print_info("종료합니다!")
         sys.exit(0)
     

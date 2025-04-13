@@ -109,11 +109,17 @@ def render_help() -> None:
 
 다음 명령들을 사용할 수 있습니다:
 
+## 기본 명령
 - **/help**: 이 도움말 표시
 - **/tools**: 사용 가능한 모든 도구 목록 표시
 - **/servers**: 구성된 MCP 서버 목록 표시
 - **/history**: 대화 기록 표시
 - **/quit**: 애플리케이션 종료
+
+## 서버 관리
+- **/addserver <이름> <명령어> [인자...]**: 새 MCP 서버 추가
+- **/removeserver <이름>**: 기존 MCP 서버 제거
+- **/testserver <이름>**: MCP 서버 연결 테스트 및 재연결
 
 언제든지 Ctrl+C를 눌러 종료할 수 있습니다.
 
@@ -130,6 +136,23 @@ def render_help() -> None:
 ```
 pymcp -m anthropic:claude-3-5-sonnet-latest
 pymcp -m ollama:llama3
+```
+
+## 서버 관리 예시
+
+새 MCP 서버 추가:
+```
+/addserver myserver npx -y @smithery/cli@latest run @myorg/mcp-server
+```
+
+서버 연결 테스트:
+```
+/testserver myserver
+```
+
+서버 제거:
+```
+/removeserver myserver
 ```
 """
     render_markdown(help_text)
