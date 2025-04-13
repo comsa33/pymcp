@@ -1,0 +1,38 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  pymcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pymcp
+    restart: unless-stopped
+    volumes:
+      - ${HOME}/.mcp.json:/root/.mcp.json
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+    networks:
+      - mcp_network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - mcp_network
+
+networks:
+  mcp_network:
+    driver: bridge
+
+volumes:
+  ollama_data:
+    driver: local
