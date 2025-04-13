@@ -92,18 +92,28 @@ class MCPClient:
         try:
             result = await self.session.call_tool(name, arguments)
             
-            # 콘텐츠가 문자열이면 직접 사용
-            if isinstance(result.content, str):
-                content = [{"type": "text", "text": result.content}]
-            # 콘텐츠가 이미 목록이면 그대로 사용
-            elif isinstance(result.content, list):
-                content = result.content
-            # 기타 형식은 JSON으로 변환
-            else:
-                content = [{"type": "text", "text": json.dumps(result.content)}]
-            
-            return CallToolResult(content=content)
-            
+            # 응답 형식 처리 개선
+            try:
+                # 1. 문자열인 경우
+                if isinstance(result.content, str):
+                    content = [{"type": "text", "text": result.content}]
+                # 2. 이미 리스트인 경우
+                elif isinstance(result.content, list):
+                    content = result.content
+                    # 각 항목이 딕셔너리가 아니면 변환
+                    for i, item in enumerate(content):
+                        if not isinstance(item, dict):
+                            content[i] = {"type": "text", "text": str(item)}
+                # 3. 그 외 다른 형식
+                else:
+                    content = [{"type": "text", "text": str(result.content)}]
+                    
+                return CallToolResult(content=content)
+            except Exception as e:
+                self.logger.error(f"결과 형식 변환 중 오류: {str(e)}")
+                # 안전한 형식으로 변환
+                return CallToolResult(content=[{"type": "text", "text": f"(형식 오류) {str(result.content)}"}])
+                
         except Exception as e:
             self.logger.error(f"도구 호출 실패 '{name}': {str(e)}")
             raise

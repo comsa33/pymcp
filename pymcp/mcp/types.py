@@ -30,4 +30,25 @@ class ContentBlock(BaseModel):
 
 class CallToolResult(BaseModel):
     """도구 호출 결과"""
-    content: Union[List[ContentBlock], List[Dict[str, Any]], str] = Field(default_factory=list)
+    content: Union[List[Dict[str, Any]], List[ContentBlock], str, Any] = Field(default_factory=list)
+    
+    model_config = {
+        "extra": "allow",  # 추가 필드 허용
+        "arbitrary_types_allowed": True  # 임의 유형 허용
+    }
+    
+    def __init__(self, **data):
+        # 입력 데이터 정규화
+        if "content" in data:
+            content = data["content"]
+            # 문자열 처리
+            if isinstance(content, str):
+                data["content"] = [{"type": "text", "text": content}]
+            # 비어있는 경우
+            elif content is None or (isinstance(content, list) and len(content) == 0):
+                data["content"] = [{"type": "text", "text": ""}]
+            # 리스트가 아닌 경우
+            elif not isinstance(content, list):
+                data["content"] = [{"type": "text", "text": str(content)}]
+        
+        super().__init__(**data)

@@ -188,12 +188,44 @@ async def run_prompt(
             logger.info(f"토큰 사용량: 입력={input_tokens}, 출력={output_tokens}, 총={input_tokens+output_tokens}")
         
         # 도구 이름 파싱
-        parts = tool_call.name.split("__")
+        tool_name = tool_call.name
+        
+        # ===== 수정 시작: 네임스페이스 처리 개선 =====
+        if "__" not in tool_name:
+            logger.debug(f"도구 이름에 네임스페이스 없음: {tool_name}, 적절한 서버 찾는 중...")
+            
+            # 서버별로 도구 확인
+            found_server = None
+            for server_name, client in mcp_clients.items():
+                try:
+                    tools_response = await client.list_tools()
+                    for tool in tools_response.tools:
+                        if tool.name == tool_name:
+                            found_server = server_name
+                            logger.debug(f"도구 {tool_name}에 적합한 서버 찾음: {server_name}")
+                            break
+                    if found_server:
+                        break
+                except Exception as e:
+                    logger.debug(f"서버 {server_name}에서 도구 확인 중 오류: {str(e)}")
+                    continue
+            
+            if found_server:
+                # 네임스페이스 추가
+                qualified_tool_name = f"{found_server}__{tool_name}"
+                logger.info(f"도구 이름에 네임스페이스 추가: {tool_name} → {qualified_tool_name}")
+                tool_name = qualified_tool_name
+            else:
+                render_error(f"도구 {tool_name}에 적합한 서버를 찾을 수 없습니다.")
+                continue
+        # ===== 수정 끝 =====
+        
+        parts = tool_name.split("__")
         if len(parts) != 2:
-            render_error(f"잘못된 도구 이름 형식: {tool_call.name}")
+            render_error(f"잘못된 도구 이름 형식: {tool_name}")
             continue
         
-        server_name, tool_name = parts
+        server_name, simple_tool_name = parts
         mcp_client = mcp_clients.get(server_name)
         if not mcp_client:
             render_error(f"서버를 찾을 수 없음: {server_name}")
@@ -204,10 +236,10 @@ async def run_prompt(
         
         # 도구 호출
         async def call_tool_task():
-            return await mcp_client.call_tool(tool_name, tool_args)
+            return await mcp_client.call_tool(simple_tool_name, tool_args)
         
         try:
-            tool_result = await run_with_spinner(f"도구 {tool_name} 실행 중...", call_tool_task)
+            tool_result = await run_with_spinner(f"도구 {simple_tool_name} 실행 중...", call_tool_task)
             
             # 도구 응답 생성
             tool_response = await provider.create_tool_response(
@@ -219,7 +251,7 @@ async def run_prompt(
             tool_results.append(tool_response)
             
         except Exception as e:
-            error_msg = f"도구 {tool_name} 호출 오류: {str(e)}"
+            error_msg = f"도구 {simple_tool_name} 호출 오류: {str(e)}"
             render_error(error_msg)
             
             # 오류 메시지를 도구 응답으로 저장
