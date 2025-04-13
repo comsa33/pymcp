@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Dict, List, Any, Optional
 import time
 
@@ -168,16 +169,38 @@ class OllamaProvider(Provider):
         # 도구 호출 파싱
         tool_calls = []
         for tool_call in message.get("tool_calls", []):
+            if not isinstance(tool_call, dict):
+                continue
+                
             function = tool_call.get("function", {})
             tool_calls.append(OllamaToolCall(
                 id=tool_call.get("id", f"tc_{int(time.time() * 1000)}"),
                 name=function.get("name", ""),
                 args=function.get("arguments", {})
             ))
+
+        content = message.get("content", "")
+        if not tool_calls and "[TOOL_CALLS]" in content:
+            # 내용에서 잠재적 도구 호출 추출 시도
+            import re
+            tool_match = re.search(r'desktop-commander__(\w+)[\s\n]*({[^}]+})', content)
+            if tool_match:
+                tool_name = f"desktop-commander__{tool_match.group(1)}"
+                try:
+                    args = json.loads(tool_match.group(2))
+                    tool_calls.append(OllamaToolCall(
+                        id=f"extracted_{int(time.time() * 1000)}",
+                        name=tool_name,
+                        args=args
+                    ))
+                    # 내용에서 도구 호출 부분 제거
+                    content = re.sub(r'\[TOOL_CALLS\].*?({[^}]+})', '', content, flags=re.DOTALL)
+                except json.JSONDecodeError:
+                    pass
         
         return OllamaMessage(
             role=message.get("role", "assistant"),
-            content=message.get("content", ""),
+            content=content,
             tool_calls=tool_calls
         )
     

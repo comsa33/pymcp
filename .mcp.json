@@ -1,16 +1,27 @@
 {
     "mcpServers": {
-      "playwright-mcp-server": {
+      "server-sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@smithery-ai/server-sequential-thinking",
+        "--key",
+        "3e96632d-83b0-41f7-92f6-5241fbd78ad7"
+      ]
+    },
+      "think-mcp-server": {
         "command": "npx",
         "args": [
           "-y",
           "@smithery/cli@latest",
           "run",
-          "@executeautomation/playwright-mcp-server",
+          "@PhillipRt/think-mcp-server",
           "--key",
           "3e96632d-83b0-41f7-92f6-5241fbd78ad7"
         ]
-      },
+    },
       "desktop-commander": {
         "command": "npx",
         "args": [
@@ -21,6 +32,6 @@
           "--key",
           "3e96632d-83b0-41f7-92f6-5241fbd78ad7"
         ]
-      }
     }
+  }
 }

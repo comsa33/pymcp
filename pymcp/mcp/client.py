@@ -1,14 +1,12 @@
-import asyncio
-from typing import Dict, List, Any, Optional, Tuple
 import os
-import json
 import logging
+from typing import Dict, List, Any, Optional
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 from pydantic import BaseModel
 
-from pymcp.mcp.types import Tool, ListToolsResponse, CallToolRequest, CallToolResult
+from pymcp.mcp.types import Tool, ListToolsResponse, CallToolResult
 
 class MCPClient:
     """MCP 클라이언트"""
@@ -81,13 +79,6 @@ class MCPClient:
         """도구 호출"""
         if not self.session:
             raise ValueError("세션이 초기화되지 않았습니다")
-        
-        request = CallToolRequest(
-            params=dict(
-                name=name,
-                arguments=arguments
-            )
-        )
         
         try:
             result = await self.session.call_tool(name, arguments)

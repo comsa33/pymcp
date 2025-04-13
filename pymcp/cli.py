@@ -1,17 +1,16 @@
 import asyncio
-import json
 import logging
 import os
 import sys
-import time
-from typing import Dict, List, Any, Optional, Union
+import re
+from typing import Dict, List, Any, Optional
 
 import typer
 from dotenv import load_dotenv
 from rich.logging import RichHandler
 
-from pymcp.config import Config, ServerConfig
-from pymcp.llm.provider import Provider, Tool, Message
+from pymcp.config import Config
+from pymcp.llm.provider import Provider, Tool
 from pymcp.llm.anthropic import AnthropicProvider
 from pymcp.llm.openai import OpenAIProvider
 from pymcp.llm.ollama import OllamaProvider
@@ -19,9 +18,13 @@ from pymcp.llm.google import GoogleProvider
 from pymcp.mcp.client import MCPClient, create_mcp_clients, close_mcp_clients
 from pymcp.history import HistoryMessage, add_message_to_history
 from pymcp.utils.rendering import (
-    render_markdown, render_error, render_tool_call, 
-    render_prompt_response, render_tools_list, render_servers_list,
-    render_help, render_history
+    render_error, 
+    render_tool_call, 
+    render_prompt_response, 
+    render_tools_list, 
+    render_servers_list,
+    render_help, 
+    render_history
 )
 from pymcp.utils.terminal import get_user_input, run_with_spinner, print_info
 
@@ -172,7 +175,8 @@ async def run_prompt(
     
     # 텍스트 내용이 있으면 표시
     if message.content:
-        render_prompt_response("assistant", message.content)
+        cleaned_content = re.sub(r'\[TOOL_CALLS\]', '', message.content)
+        render_prompt_response("assistant", cleaned_content)
     
     # 메시지 저장
     message_history = add_message_to_history(message_history, message)
@@ -190,7 +194,6 @@ async def run_prompt(
         # 도구 이름 파싱
         tool_name = tool_call.name
         
-        # ===== 수정 시작: 네임스페이스 처리 개선 =====
         if "__" not in tool_name:
             logger.debug(f"도구 이름에 네임스페이스 없음: {tool_name}, 적절한 서버 찾는 중...")
             
@@ -218,7 +221,6 @@ async def run_prompt(
             else:
                 render_error(f"도구 {tool_name}에 적합한 서버를 찾을 수 없습니다.")
                 continue
-        # ===== 수정 끝 =====
         
         parts = tool_name.split("__")
         if len(parts) != 2:
@@ -246,9 +248,12 @@ async def run_prompt(
                 tool_call_id=tool_call.id,
                 content=tool_result.content
             )
+            logger.debug(f"도구 {simple_tool_name} 응답: {tool_response.content}")
             
             # 도구 응답 저장
             tool_results.append(tool_response)
+            logger.info(f"도구 {simple_tool_name} 응답 저장됨")
+
             
         except Exception as e:
             error_msg = f"도구 {simple_tool_name} 호출 오류: {str(e)}"
